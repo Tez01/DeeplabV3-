@@ -4,6 +4,7 @@ from keras.models import Model
 from keras import layers
 from keras.layers import Input,Activation,Concatenate,Add,Dropout,BatchNormalization,Conv2D,DepthwiseConv2D,ZeroPadding2D,AveragePooling2D
 from keras import backend as K
+from keras.applications import imagenet_utils
 WEIGHTS_PATH_X="https://github.com/bonlime/keras-deeplab-v3-plus/releases/download/1.1/deeplabv3_xception_tf_dim_ordering_tf_kernels.h5"
 WEIGHTS_PATH_MOBILE = "https://github.com/bonlime/keras-deeplab-v3-plus/releases/download/1.1/deeplabv3_mobilenetv2_tf_dim_ordering_tf_kernels.h5"
 
@@ -175,4 +176,50 @@ def DeepLabv3(weights='pascal_voc',input_tensor=None,input_shape=(512,512,3)):
 
     else:
         x= Concatenate()([b4,b0])
-    
+
+    x = Conv2D(256,(1,1),padding='same',use_bias=False,name='concat_projection')(x)
+    x= Activation('relu')(x)
+    x= Dropout(0.1)(x)
+
+    # Deeplab v3+ decoder
+
+    if backbone == 'xception':
+        # Feature projection
+        # x4 (x2) block
+        x= BilinearUpsampling(output_size=(int(np.cell(input_shape[0]/4)),int(np.ceil(input_shape[1]/4))))(x)
+        dec_skip1= Conv2D(48,(1,1),padding='same',use_bias=False,name='feature_projection0')(skip1)
+
+        x= Concatenate()([x,dec_skip1])
+        x= SepConv_BN(x,256,'decoder_conv0',depth_activation=True,epsilon=1e-5)
+
+        x= SepConv_BN(x,256,'decoder_conv1',depth_activation=True,epsilon=1e-5)
+    if classes== 21:
+        last_layer_name='logits_semantic'
+
+    else:
+        last_layer_name= 'custom_logits_semantic'
+
+    x= Conv2D(classes, (1,1), padding= 'same',name=last_layer_name)(x)
+    x= BilinearUpsampling(output_size=(input_shape[0],input_shape[1]))(x)
+
+    ``` ensure that the model takes into account any potenial predecessors of input_tensor.```
+
+    if input_tensor is not None:
+        inputs=get_source_inputs(input_tensor)
+
+    else:
+        inputs= img_input
+
+    model = Model(inputs,x,name='deeplabv3plus')
+
+
+    if weights=='pascal_voc':
+        if backbone== 'xception':
+            weight_path= get_file('deeplabv3_xception_tf_dim_ordering_tf_kernels.h5',WEIGHTS_PATH_X,cache_subdie='models')
+
+
+        model.load_weights(weights_path, by_name = True)
+
+    return model
+def preprocess_input(x):
+    return imagenet_utils.preprocess_input(x, mode='tf')
