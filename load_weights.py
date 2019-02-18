@@ -28,6 +28,4 @@ for layer in tqdm(model.layers):
     if not os.path.exists(MODEL_DIR):
         os.makedirs(MODEL_DIR)
 
-    model.save_weights(os.path.join(MODEL_DIR,OUTPUT_WEIGHHT_FILENAME))
-
-    
+    model.save_weights(os.path.join(MODEL_DIR,OUTPUT_WEIGHT_FILENAME))

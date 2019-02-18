@@ -2,9 +2,13 @@ import numpy as np
 
 from keras.models import Model
 from keras import layers
+from keras.engine import Layer
+from keras.engine import InputSpec
 from keras.layers import Input,Activation,Concatenate,Add,Dropout,BatchNormalization,Conv2D,DepthwiseConv2D,ZeroPadding2D,AveragePooling2D
 from keras import backend as K
 from keras.applications import imagenet_utils
+from keras.utils import conv_utils
+from keras.utils.data_utils import get_file
 WEIGHTS_PATH_X="https://github.com/bonlime/keras-deeplab-v3-plus/releases/download/1.1/deeplabv3_xception_tf_dim_ordering_tf_kernels.h5"
 WEIGHTS_PATH_MOBILE = "https://github.com/bonlime/keras-deeplab-v3-plus/releases/download/1.1/deeplabv3_mobilenetv2_tf_dim_ordering_tf_kernels.h5"
 
@@ -16,10 +20,10 @@ class BilinearUpsampling(Layer):
 
         if  output_size:
             self.output_size=conv_utils.normalize_tuple(output_size,2,'output_size')
-            self.upsampling=none
+            self.upsampling=None
         else:
-            self.output_size=none
-            seld.upsampling=conv_utils.normalize_tuple(upsampling,2,'upsampling')
+            self.output_size=None
+            self.upsampling=conv_utils.normalize_tuple(upsampling,2,'upsampling')
     def compute_output_shape(self,input_shape):
         if self.upsampling:
             height=self.upsampling[0]*input_shape[1] if input_shape[1]\
@@ -33,7 +37,7 @@ class BilinearUpsampling(Layer):
 
     def call(self,inputs):
         if self.upsampling:
-            return K.tf.image.resize_bilinear(inputs,(inputs.shape[1]*self.upsampling[0],inputs.shape[2]*self.upsampling[1],align_corners=True))
+            return K.tf.image.resize_bilinear(inputs,(inputs.shape[1]*self.upsampling[0],inputs.shape[2]*self.upsampling[1]),align_corners=True)
         else:
             return K.tf.image.resize_bilinear(inputs,(self.output_size[0],self.output_size[1]),align_corners=True)
 
@@ -43,6 +47,15 @@ class BilinearUpsampling(Layer):
         return dict(list(base_config.items())+list(config.items()))
 
 def SepConv_BN(x,filters,prefix,stride=1,kernel_size=3,rate=1,depth_activation=False,epsilon = 1e-3):
+    if stride == 1:
+        depth_padding = 'same'
+    else:
+        kernel_size_effective = kernel_size + (kernel_size - 1) * (rate - 1)
+        pad_total = kernel_size_effective - 1
+        pad_beg = pad_total // 2
+        pad_end = pad_total - pad_beg
+        x = ZeroPadding2D((pad_beg, pad_end))(x)
+        depth_padding = 'valid'
     x= DepthwiseConv2D((kernel_size,kernel_size),strides=(stride,stride),dilation_rate=(rate,rate),padding=depth_padding,use_bias=False,name=prefix+'_depthwise')(x)
     x=BatchNormalization(name=prefix+'_depthwise_BN',epsilon=epsilon)(x)
     if depth_activation:
@@ -65,14 +78,15 @@ def _conv2d_same(x,filters,prefix,stride=1, kernel_size=3, rate =1):
         pad_beg=pad_total//2
         pad_end=pad_total-pad_beg
         x=ZeroPadding2D((pad_beg,pad_end))(x)
-        return Conv2D(filters,(kerneL_size,kernel_size),strides=(stride,stride),padding='valid',use_bias=False,dilation_rate=(rate,rate),name=prefix)(x)
+        return Conv2D(filters,(kernel_size,kernel_size),strides=(stride,stride),padding='valid',use_bias=False,dilation_rate=(rate,rate),name=prefix)(x)
 
-def _xception_block(inputs,depth_list,prefix,stride,rate=1,depth_activation=False,return_skip=False,skip_connection_type):
+def _xception_block(inputs,depth_list,prefix,skip_connection_type,stride,rate=1,depth_activation=False,return_skip=False):
+    residual= inputs
     for i in range(3):
         residual = SepConv_BN(residual,depth_list[i],prefix + '_separable_conv{}'.format(i+1), stride=stride if i==2 else 1, rate = rate, depth_activation=depth_activation)
 
         if i==1:
-            skip= Residual
+            skip= residual
     if skip_connection_type=='conv':
         shortcut= _conv2d_same(inputs, depth_list[-1],prefix+'_shortcut',kernel_size=1,stride=stride)
 
@@ -81,8 +95,8 @@ def _xception_block(inputs,depth_list,prefix,stride,rate=1,depth_activation=Fals
     elif skip_connection_type=='sum':
         outputs=layers.add([residual,inputs])
 
-    elif skip_connection-type=='none':
-        outputs=Residual
+    elif skip_connection_type=='none':
+        outputs=residual
     if return_skip:
         return outputs,skip
     else:
@@ -108,10 +122,10 @@ def _inverted_res_block(inputs):
     prefix='expanded_conv_{}_'.format(block_id)
     if block_id:'''
 
-def DeepLabv3(weights='pascal_voc',input_tensor=None,input_shape=(512,512,3)):
+def DeepLabv3(weights='pascal_voc',input_tensor=None,input_shape=(512,512,3),classes=21,backbone='xception',OS=16,alpha=1):
     if not (weights in {'pascal_voc',None}):
         raise ValueError('the weights argument should be either' 'None(random initialization or pascal_voc''(pre-trained on PASCAL VOC))')
-    if not (backbone in {'xception','mobilenetv2'}):
+    if not ( backbone in {'xception','mobilenetv2'}):
         raise ValueError('The DeeplabV3+ model is only available with'
         'the Tensorflow backend')
     if K.backend()!='tensorflow':
@@ -123,7 +137,7 @@ def DeepLabv3(weights='pascal_voc',input_tensor=None,input_shape=(512,512,3)):
             img_input= Input(tensor=input_tensor,shape=input_shape)
         else:
             img_input=input_tensor
-    if backbone='xception':
+    if backbone=='xception':
         if OS==8:
             entry_block3_stride=1#???????
             middle_block_rate=2
@@ -147,7 +161,7 @@ def DeepLabv3(weights='pascal_voc',input_tensor=None,input_shape=(512,512,3)):
         x=_xception_block(x,[728,728,728],'entry_flow_block3',skip_connection_type='conv',stride=entry_block3_stride,depth_activation=False)
         for i in range(16):
             x=_xception_block(x,[728,728,728],'middle_flow_unit_{}'.format(i+1),skip_connection_type='sum',stride=1,rate=middle_block_rate,depth_activation=False)
-        x=_xception_block(x,[728,1024,1024],'exit_flow_block1',skip_connection_type='conv',stride=1,rate=exit_block_rates[0],depth_activation=False)
+        x=_xception_block(x,[728,1024,1024],'exit_flow_block1',skip_connection_type='conv',stride=1,rate=exit_block_rate[0],depth_activation=False)
         x=_xception_block(x,[1536,1536,2048],'exit_flow_block2',skip_connection_type='none',stride=1,rate=exit_block_rate[1],depth_activation=True)
 #End of feature extractor for Xception
 
@@ -158,16 +172,16 @@ def DeepLabv3(weights='pascal_voc',input_tensor=None,input_shape=(512,512,3)):
     b4= BilinearUpsampling((int(np.ceil(input_shape[0]/OS)),int(np.ceil(input_shape[1]/OS))))(b4)
 
  # simple 1x1
-    b0=Conv2D(256,(1,1),padding='same',use_bias-False,name='aspp0')(x)
+    b0=Conv2D(256,(1,1),padding='same',use_bias=False,name='aspp0')(x)
     b0=BatchNormalization(name='aspp0_BN',epsilon=1e-5)(b0)
     b0=Activation('relu',name='aspp0_activation')(b0)
 
     if backbone=='xception':
         # rate = 6
-        b1= SepConv_BN(x,256,'aspp1',rate=atrous_rate[0],depth_activation=True,epsilon=1e-5)
+        b1= SepConv_BN(x,256,'aspp1',rate=atrous_rates[0],depth_activation=True,epsilon=1e-5)
 
         # rate=12
-        b2= SepConv_BN(X,256,'aspp2',rate=atrous_rates[1],depth_activation=True,epsilon=1e-5)          # why depth activation=True
+        b2= SepConv_BN(x,256,'aspp2',rate=atrous_rates[1],depth_activation=True,epsilon=1e-5)          # why depth activation=True
 
         # rate= 18
         b3 =SepConv_BN(x,256,'aspp3',rate=atrous_rates[2],depth_activation=True,epsilon= 1e-5)
@@ -186,7 +200,7 @@ def DeepLabv3(weights='pascal_voc',input_tensor=None,input_shape=(512,512,3)):
     if backbone == 'xception':
         # Feature projection
         # x4 (x2) block
-        x= BilinearUpsampling(output_size=(int(np.cell(input_shape[0]/4)),int(np.ceil(input_shape[1]/4))))(x)
+        x= BilinearUpsampling(output_size=(int(np.ceil(input_shape[0]/4)),int(np.ceil(input_shape[1]/4))))(x)
         dec_skip1= Conv2D(48,(1,1),padding='same',use_bias=False,name='feature_projection0')(skip1)
 
         x= Concatenate()([x,dec_skip1])
@@ -202,7 +216,7 @@ def DeepLabv3(weights='pascal_voc',input_tensor=None,input_shape=(512,512,3)):
     x= Conv2D(classes, (1,1), padding= 'same',name=last_layer_name)(x)
     x= BilinearUpsampling(output_size=(input_shape[0],input_shape[1]))(x)
 
-    ``` ensure that the model takes into account any potenial predecessors of input_tensor.```
+    ''' ensure that the model takes into account any potenial predecessors of input_tensor.'''
 
     if input_tensor is not None:
         inputs=get_source_inputs(input_tensor)
@@ -215,10 +229,10 @@ def DeepLabv3(weights='pascal_voc',input_tensor=None,input_shape=(512,512,3)):
 
     if weights=='pascal_voc':
         if backbone== 'xception':
-            weight_path= get_file('deeplabv3_xception_tf_dim_ordering_tf_kernels.h5',WEIGHTS_PATH_X,cache_subdie='models')
+            weight_path= get_file('deeplabv3_xception_tf_dim_ordering_tf_kernels.h5',WEIGHTS_PATH_X,cache_subdir='models')
 
 
-        model.load_weights(weights_path, by_name = True)
+        model.load_weights(weight_path, by_name = True)
 
     return model
 def preprocess_input(x):
